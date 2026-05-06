@@ -1,0 +1,44 @@
+#!/bin/bash
+TARGET_COV=5
+GENOME_SIZE=3100000000  # Human genome size in bp (adjust if needed)
+OUTDIR="downsampled_5X"
+
+mkdir -p "$OUTDIR"
+
+for BAM in G37-*-TUMOR_thruplex-tag-seq-hv_*.recalibrated.bam; do
+    SAMPLE=$(basename "$BAM" .bam)
+    echo "Processing: $SAMPLE"
+
+    # Get mapped read count
+    MAPPED_READS=$(samtools flagstat "$BAM" | grep "mapped (" | awk '{print $1}')
+
+    # Estimate read length from first 1000 reads
+    READ_LEN=$(samtools view -F 4 "$BAM" | head -1000 | awk '{print length($10)}' | \
+               sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+
+    # Calculate current coverage and downsample fraction using awk
+    FRACTION=$(awk -v mapped="$MAPPED_READS" -v rlen="$READ_LEN" \
+                   -v gsize="$GENOME_SIZE" -v target="$TARGET_COV" \
+               'BEGIN {
+                   cov = (mapped * rlen) / gsize;
+                   printf "Current coverage: %.2fX\n", cov > "/dev/stderr";
+                   frac = target / cov;
+                   if (frac >= 1.0) print "SKIP";
+                   else printf "%.6f", frac;
+               }')
+
+    echo "  Downsample fraction: $FRACTION"
+
+    if [ "$FRACTION" = "SKIP" ]; then
+        echo "  Coverage already ≤ ${TARGET_COV}X, skipping."
+        continue
+    fi
+
+    # Strip leading zero for samtools -s seed format (e.g. 0.0625 -> 42.0625)
+    FRAC_DECIMAL="${FRACTION#0.}"
+
+    # Downsample into output folder
+    samtools view -s "42.${FRAC_DECIMAL}" -b "$BAM" -o "${OUTDIR}/${SAMPLE}.5X.bam" --threads 4
+    samtools index "${OUTDIR}/${SAMPLE}.5X.bam"
+    echo "  Done: ${OUTDIR}/${SAMPLE}.5X.bam"
+done
